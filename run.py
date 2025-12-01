@@ -573,7 +573,11 @@ class UI(QWidget):
         self.conf=os.path.join(os.path.expanduser("~"),".hidden_gems_launcher.json")
         self.last=os.path.expanduser("~")
         self.base=os.path.dirname(os.path.abspath(__file__))
-        self.stages=yaml.safe_load(open(os.path.join(self.base,"stages.yaml")))
+        stages_file = os.path.join(self.base, "stages.yaml")
+        if os.path.exists(stages_file):
+            self.stages = yaml.safe_load(open(stages_file))
+        else:
+            self.stages = {}
         self.customstages_path=os.path.join(self.base,"customstages.yaml")
         if os.path.exists(self.customstages_path):
             self.customstages=yaml.safe_load(open(self.customstages_path))
@@ -910,7 +914,7 @@ class UI(QWidget):
             else:
                 subprocess.Popen(
                     ["wsl.exe", "bash", "-lc", cmd],
-                    creationflags=subprocess.CREATE_NEW_CONSOLE
+                    creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform.startswith("win") else 0
                 )
         else:
             run_dir = self.base
@@ -959,10 +963,15 @@ class Main(QMainWindow):
         self.dock.setWidget(self.debug)
         self.addDockWidget(Qt.RightDockWidgetArea,self.dock)
         self.dock.hide()
-        self.tray=QSystemTrayIcon(self)
-        self.tray.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
-        self.tray.show()
-        self.visualizer=None
+        
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray = QSystemTrayIcon(self)
+            self.tray.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
+            self.tray.show()
+        else:
+            self.tray = None
+        
+        self.visualizer = None
     def show_debug(self):
         self.dock.show();self.dock.raise_()
     def show_visualizer(self):
@@ -1000,8 +1009,9 @@ class Main(QMainWindow):
             self.ui.out.append(f"❌ Visualizer error: {e}")
             import traceback
             self.ui.out.append(traceback.format_exc())
-    def notify(self,t,m):
-        self.tray.showMessage(t,m,QSystemTrayIcon.Information,3000)
+    def notify(self, t, m):
+        if self.tray is not None:
+            self.tray.showMessage(t, m, QSystemTrayIcon.Information, 3000)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
