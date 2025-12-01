@@ -629,6 +629,9 @@ class UI(QWidget):
         self.prof=cbox("Profile",False)
         self.det=cbox("Check Determinism",False)
         self.docker=cbox("Use Docker",False)
+        self.use_multicore=cbox("Use Multi-Core Execution",False)
+        self.thread_count=ibox("Thread Count",8)
+        self.thread_count.setRange(1,64)
         self.rounds=ibox("Rounds",1)
         self.rseeds=tbox("Round Seeds")
         self.verb=ibox("Verbose",2)
@@ -675,6 +678,70 @@ class UI(QWidget):
             out = os.path.join(self.base, "runner_patched.rb")
             code = open(runner, "r", encoding="utf-8").read()
 
+            if "require 'rbconfig'" not in code:
+                code = re.sub(
+                    r"(require 'zlib')",
+                    r"\1\nrequire 'rbconfig'\nrequire 'tmpdir'",
+                    code
+                )
+            
+            code = re.sub(r'\nTHREADS = \d+', '', code)
+            
+            if 'def kill_bot_process' not in code:
+                kill_method = '''
+    def kill_bot_process(bot_io)
+        pid = bot_io.wait_thr.pid
+        if Gem.win_platform?
+            system("taskkill /PID #{pid} /T /F >NUL 2>&1")
+        else
+            begin
+                if @use_docker
+                    Process.kill('TERM', pid)
+                else
+                    Process.kill('TERM', -pid)
+                end
+            rescue Errno::ESRCH
+            end
+        end
+    end
+'''
+                code = re.sub(
+                    r'(Bot\.new\(stdin, stdout, stderr, wait_thr\)\s+end)',
+                    r'\1\n' + kill_method,
+                    code
+                )
+            
+            if 'spawn_opts = {' not in code:
+                code = re.sub(
+                    r'stdin, stdout, stderr, wait_thr = Open3\.popen3\(\[path, File\.basename\(path\)\], chdir: File\.dirname\(path\)\)',
+                    '''spawn_opts = { chdir: File.dirname(path) }
+                if Gem.win_platform?
+                    spawn_opts[:new_pgroup] = true
+                else
+                    spawn_opts[:pgroup] = true
+                end
+                stdin, stdout, stderr, wait_thr = Open3.popen3([path, File.basename(path)], spawn_opts)''',
+                    code
+                )
+            
+            code = re.sub(
+                r'@bots_io\.each do \|b\|\s+b\.wait_thr\.join\([^)]+\)[^\n]+\n\s+end',
+                '@bots_io.each { |b| kill_bot_process(b) }',
+                code
+            )
+
+            code = re.sub(
+                r"(%w\(stage_key width height generator max_ticks emit_signals vis_radius max_gems\s+gem_spawn_rate gem_ttl signal_radius signal_cutoff signal_noise\s+signal_quantization signal_fade)\)",
+                r"\1 enable_debug)",
+                code
+            )
+
+            code = re.sub(
+                r"command = line\.split\(' '\)\.first\.strip",
+                "command = (line.split(' ').first || '').strip",
+                code
+            )
+
             if not re.search(r'@round_debug_protocol\s*=', code):
                 code = re.sub(
                     r'(@protocol\s*=\s*@bots\.map\s+\{\s*\|b\|\s*\[\]\s*\})',
@@ -686,11 +753,30 @@ class UI(QWidget):
                 code = code.replace('class Runner', helper_funcs + '\nclass Runner')
 
             if not re.search(r'@round_debug_protocol\[i\]\s*<<\s*debug_entry', code):
-                enhanced_entry = '\n\nbot_pos_for_debug = @bots[i][:position]\nstate_delta = compute_state_delta(nil, nil)\nvisible_tiles = @visibility[(bot_pos_for_debug[1] << 16) | bot_pos_for_debug[0]].to_a.map { |offset| [offset & 0xFFFF, offset >> 16] }\ninfluence_map = compute_influence_map(@width, @height, bot_pos_for_debug, @gems)\ngem_spawn_probability_map = compute_gem_probability_map(@width, @height, @floor_tiles, @gems, bot_pos_for_debug)\nall_gems = @gems.map { |g| {position: g[:position], ttl: g[:ttl]} }\n\ndebug_entry = {\n  tick: @tick,\n  bots: @protocol[i].last[:bots],\n  state_delta: state_delta,\n  fov: visible_tiles,\n  influence: influence_map,\n  gem_prediction: gem_spawn_probability_map,\n  all_gems: all_gems\n}\n@round_debug_protocol[i] << debug_entry'
+                enhanced_entry = '''
+                        bot_pos_for_debug = @bots[i][:position]
+                        state_delta = compute_state_delta(nil, nil)
+                        visible_tiles = @visibility[(bot_pos_for_debug[1] << 16) | bot_pos_for_debug[0]].to_a.map { |offset| [offset & 0xFFFF, offset >> 16] }
+                        influence_map = compute_influence_map(@width, @height, bot_pos_for_debug, @gems)
+                        gem_spawn_probability_map = compute_gem_probability_map(@width, @height, @floor_tiles, @gems, bot_pos_for_debug)
+                        all_gems = @gems.map { |g| {position: g[:position], ttl: g[:ttl]} }
+
+                        debug_entry = {
+                          tick: @tick,
+                          bots: @protocol[i].last[:bots],
+                          state_delta: state_delta,
+                          fov: visible_tiles,
+                          influence: influence_map,
+                          gem_prediction: gem_spawn_probability_map,
+                          all_gems: all_gems
+                        }
+                        @round_debug_protocol[i] << debug_entry
+'''
                 code = re.sub(
-                    r'(@protocol\[i\]\.last\[:bots\]\[:debug_json\]\s*=\s*debug_json)',
+                    r"(elsif command == 'WAIT'\s+else\s+end)",
                     r'\1' + enhanced_entry,
-                    code
+                    code,
+                    flags=re.DOTALL
                 )
             if not re.search(r'results\[i\]\[:debug_protocol\]\s*=\s*@round_debug_protocol', code):
                 code = re.sub(
@@ -705,8 +791,243 @@ class UI(QWidget):
                     code
                 )
 
+            if "--multi-core" not in code:
+                if 'opts.on("--[no-]enable-debug"' in code:
+                    code = re.sub(
+                        r'(opts\.on\("--\[no-\]enable-debug".*?\n\s*end\n)(\s*end\.parse!)',
+                        r'\1    opts.on("--multi-core", "Enable multi-core parallel execution") do |x|\n        options[:multi_core] = x\n    end\n    opts.on("--threads N", Integer, "Number of threads for multi-core execution (default: 15)") do |x|\n        options[:threads] = x\n    end\n\2',
+                        code,
+                        flags=re.DOTALL
+                    )
+                
+                multicore_patch = r"""
+
+if options[:multi_core] && options[:rounds].to_i > 1
+  og_seed = options[:seed]
+  round_seed_base = Digest::SHA256.digest("#{options[:seed]}/rounds").unpack1('L<')
+  seed_rng        = PCG32.new(round_seed_base)
+
+  all_seed = []
+  options[:rounds].times do |i|
+    round_seed_value = if options[:round_seeds]
+      options[:round_seeds][i].to_i(36)
+    else
+      seed_rng.randrange(2 ** 32)
+    end
+    all_seed << round_seed_value
+  end
+
+  bot_count = bot_paths.size
+
+  all_score              = Array.new(bot_count) { Array.new(options[:rounds]) }
+  all_utilization        = Array.new(bot_count) { Array.new(options[:rounds]) }
+  all_ttfc               = Array.new(bot_count) { Array.new(options[:rounds]) }
+  all_tc                 = Array.new(bot_count) { Array.new(options[:rounds]) }
+  all_disqualified_for   = Array.new(bot_count) { Array.new(options[:rounds]) }
+  all_response_time_stats = Array.new(bot_count) { Array.new(options[:rounds]) }
+  all_stderr_logs        = Array.new(bot_count) { Array.new(options[:rounds]) }
+
+  bot_data       = Array.new(bot_count)
+  bot_data_mutex = Mutex.new
+
+  build_child_cmd = lambda do |seed, json_path|
+    runner_path = File.expand_path("runner_patched.rb", __dir__)
+    runner_path = File.expand_path("runner.rb", __dir__) unless File.exist?(runner_path)
+    cmd = [RbConfig.ruby, runner_path]
+    cmd += ['--stage', stage_key] if stage_key
+    cmd += [
+      '--seed', seed.to_s(36),
+      '--generator',        options[:generator],
+      '--ticks',            options[:max_ticks].to_s,
+      '--vis-radius',       options[:vis_radius].to_s,
+      (options[:emit_signals] ? '--emit-signals' : '--no-emit-signals'),
+      '--signal-radius',        options[:signal_radius].to_s,
+      '--signal-quantization',  options[:signal_quantization].to_s,
+      '--signal-noise',         options[:signal_noise].to_s,
+      '--signal-cutoff',        options[:signal_cutoff].to_s,
+      '--signal-fade',          options[:signal_fade].to_s,
+      (options[:swap_bots] ? '--swap-bots' : '--no-swap-bots'),
+      (options[:cache] ? '--cache' : '--no-cache'),
+      (options[:use_docker] ? '--use-docker' : '--no-use-docker'),
+      (options[:announcer_enabled] ? '--announcer' : '--no-announcer'),
+      (options[:show_timings] ? '--show-timings' : '--no-show-timings'),
+      (options[:start_paused] ? '--start-paused' : '--no-start-paused'),
+      '--highlight-color',  options[:highlight_color],
+      '--write-profile-json', json_path,
+      '--profile',
+      '--rounds', '1',
+      '--verbose', '0',
+      '--max-tps', '0'
+    ]
+    cmd += bot_paths
+    cmd
+  end
+
+  jobs = Queue.new
+  options[:rounds].times { |i| jobs << i }
+
+  progress_mutex   = Mutex.new
+  completed        = 0
+  start_time       = Time.now
+  last_print_time  = start_time
+  total_rounds     = options[:rounds]
+
+  print_progress = lambda do
+    elapsed = Time.now - start_time
+    pct     = (completed * 100.0 / total_rounds).floor
+    rate    = (elapsed > 0 && completed > 0) ? (completed / elapsed) : 0.0
+    remain  = total_rounds - completed
+    eta_s   = (rate > 0) ? (remain / rate) : nil
+    eta_str = eta_s ? "%02d:%02d" % [eta_s.to_i / 60, eta_s.to_i % 60] : "--:--"
+    line    = "Progress: #{completed}/#{total_rounds} (#{pct}%) · ETA #{eta_str}"
+    $stderr.print("\r#{line.ljust(80)}")
+    $stderr.flush
+  end
+
+  threads_to_use = options[:threads] || 15
+  workers = Array.new(threads_to_use) do
+    Thread.new do
+      loop do
+        idx = (jobs.pop(true) rescue nil)
+        break unless idx
+
+        job_seed = all_seed[idx]
+
+        begin
+          Dir.mktmpdir("runner_round_#{idx}_") do |dir|
+            json_path = File.join(dir, "round.json")
+            cmd       = build_child_cmd.call(job_seed, json_path)
+
+            stdout, stderr, status = Open3.capture3(*cmd)
+
+            unless status.success? && File.exist?(json_path)
+              warn "⚠️  Round #{idx + 1}: child failed or JSON missing."
+              warn "Status: #{status.exitstatus}" unless status.success?
+              warn "STDERR:\n#{stderr}" unless stderr.empty?
+              next
+            end
+
+            data = JSON.parse(File.read(json_path))
+
+            data.each_with_index do |report, k|
+              if bot_data[k].nil?
+                bot_data_mutex.synchronize do
+                  if bot_data[k].nil?
+                    bot_data[k] = {
+                      name:  report['name'],
+                      emoji: report['emoji']
+                    }
+                  end
+                end
+              end
+
+              round = report['rounds'][0]
+
+              all_score[k][idx]            = round['score']
+              all_utilization[k][idx]      = round['gem_utilization']
+              all_ttfc[k][idx]             = round['ticks_to_first_capture']
+              all_tc[k][idx]               = round['floor_coverage']
+              all_disqualified_for[k][idx] = round['disqualified_for']
+              all_response_time_stats[k][idx] = round['response_time_stats']
+              all_stderr_logs[k][idx]      = round['stderr_log']
+            end
+          end
+        ensure
+          progress_mutex.synchronize do
+            completed += 1
+            now = Time.now
+            if completed == total_rounds || (now - last_print_time) >= 0.5
+              print_progress.call
+              last_print_time = now
+            end
+          end
+        end
+      end
+    end
+  end
+
+  workers.each(&:join)
+  $stderr.puts
+
+  puts
+
+  all_reports = []
+  bot_data.each_with_index do |data, i|
+    next unless data
+
+    puts "Results for #{data[:emoji]} #{data[:name]}"
+
+    n    = all_utilization[i].size
+    mean = all_utilization[i].sum(0.0) / n
+    var  = all_utilization[i].map { |x| (x - mean) ** 2 }.sum / n
+    sd   = Math.sqrt(var)
+    cv   = sd / mean * 100.0
+
+    puts sprintf("Total Score     : %5d", all_score[i].sum)
+    puts sprintf("Gem Utilization : %5.1f %%", mean)
+    if cv.nan?
+      puts sprintf("Chaos Factor    :     -")
+    else
+      puts sprintf("Chaos Factor    : %5.1f %%", cv)
+    end
+    puts sprintf("Floor Coverage  : %5.1f %%", mean(all_tc[i]))
+
+    report = {}
+    report[:timestamp]            = Time.now.to_i
+    report[:stage_key]            = stage_key
+    report[:stage_title]          = stage_title
+    report[:git_hash]             = `git describe --always --dirty`.strip
+    report[:seed]                 = og_seed.to_s(36)
+    report[:name]                 = data[:name]
+    report[:emoji]                = data[:emoji]
+    report[:total_score]          = all_score[i].sum
+    report[:gem_utilization_mean] = mean
+    report[:gem_utilization_cv]   = cv.nan? ? nil : cv
+    report[:floor_coverage_mean]  = mean(all_tc[i])
+
+    report[:rounds] = all_score[i].map.with_index do |_, k|
+      d = {
+        :seed                  => all_seed[k].to_s(36),
+        :score                 => all_score[i][k],
+        :gem_utilization       => all_utilization[i][k],
+        :floor_coverage        => all_tc[i][k],
+        :ticks_to_first_capture => all_ttfc[i][k],
+        :disqualified_for      => all_disqualified_for[i][k],
+        :response_time_stats   => all_response_time_stats[i][k],
+      }
+      if d[:disqualified_for]
+        d[:stderr_log] = all_stderr_logs[i][k]
+      end
+      d
+    end
+
+    all_reports << report
+  end
+
+  if write_profile_json_path
+    File.open(write_profile_json_path, 'w') do |f|
+      f.write(JSON.pretty_generate(all_reports))
+    end
+  end
+  
+  exit 0
+end
+
+options.delete(:multi_core)
+options.delete(:threads)
+"""
+                if 'runner = Runner.new(' in code:
+                    code = re.sub(
+                        r'(bot_paths << "random-walker"\nend\n)',
+                        r'\1' + multicore_patch + '\n',
+                        code,
+                        flags=re.DOTALL
+                    )
+                else:
+                    code += multicore_patch
+
             open(out, "w", encoding="utf-8").write(code)
-            self.out.append("✔ runner_patched.rb generated with enhanced debug protocol.")
+            self.out.append("✔ runner_patched.rb generated")
         except Exception as e:
             self.out.append("Patch failed: " + str(e))
     def apply(self):
@@ -737,6 +1058,8 @@ class UI(QWidget):
         setv(self.rseeds,"round_seeds")
         setv(self.verb,"verbose")
         setv(self.tps,"max_tps")
+        setv(self.use_multicore,"use_multicore")
+        setv(self.thread_count,"thread_count")
     def save_preset(self):
         name=self.stage.currentText()
         if not name: return
@@ -755,6 +1078,8 @@ class UI(QWidget):
         d["round_seeds"]=self.rseeds.text()
         d["verbose"]=self.verb.value()
         d["max_tps"]=self.tps.value()
+        d["use_multicore"]=self.use_multicore.isChecked()
+        d["thread_count"]=self.thread_count.value()
         self.customstages[name]=d
         with open(self.customstages_path, "w") as f:
             yaml.safe_dump(self.customstages, f)
@@ -778,10 +1103,16 @@ class UI(QWidget):
         try: c=json.load(open(self.conf,"r",encoding="utf-8"))
         except: return
         for b in c.get("bots",[]): self.bots.addItem(b)
+        if "use_multicore" in c: self.use_multicore.setChecked(c["use_multicore"])
+        if "thread_count" in c: self.thread_count.setValue(c["thread_count"])
     def save_conf(self):
         bs=[self.bots.item(i).text() for i in range(self.bots.count())]
         with open(self.conf, "w", encoding="utf-8") as f:
-            json.dump({"bots":bs}, f)
+            json.dump({
+                "bots":bs,
+                "use_multicore":self.use_multicore.isChecked(),
+                "thread_count":self.thread_count.value()
+            }, f)
     def normalize_file(self,path):
         try:
             data=open(path,"rb").read()
@@ -867,6 +1198,9 @@ class UI(QWidget):
         if self.pause.isChecked(): a.append("--start-paused")
         add("highlight-color",self.hcol.text())
         if self.dbg.isChecked(): a.append("--enable-debug")
+        if self.use_multicore.isChecked():
+            a.append("--multi-core")
+            add("threads",self.thread_count.value())
         return a
     def convert_bot_paths(self):
         out = []
