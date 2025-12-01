@@ -2,9 +2,9 @@ Hidden Gems Runner & Visualizer
 
 Ein leicht zu bedienendes GUI-Tool zum Starten, Debuggen und Visualisieren von Hidden-Gems-Bots.
 Erweitertes Game Debugging und Analysieren.
-Benutzt WSL um Bot in Linux enviourment auszuführen.
+Benutzt WSL um Bot in Linuxauszuführen.
 
-Auf Linux sollten alle funktionen verfügbar sein nur wird stat WSL eine normale Terminal Session gestartet
+Auf Linux sollten alle Funktionen verfügbar sein nur wird nicht WSL sondern eine Terminal Session gestartet
 
 
 Voraussetzungen
