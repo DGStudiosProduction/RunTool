@@ -26,6 +26,16 @@ def parse_value(x):
         a = x.split("..")[0]
         return float(a) if "." in a else int(a)
     return x
+
+
+def safe_disconnect(signal):
+    """Safely disconnect a Qt signal without crashes on Linux."""
+    try:
+        signal.disconnect()
+    except (TypeError, RuntimeError):
+        pass
+
+
 class DebugDock(QWidget):
     BACKGROUND = "#181818"
     TEXT = "#cccccc"
@@ -513,6 +523,7 @@ class DebugVisualizerWindow(QWidget):
         self.tick_slider.setMinimum(0)
         max_ticks = max(0, len(self.model.ticks) - 1)
         self.tick_slider.setMaximum(max_ticks)
+        safe_disconnect(self.tick_slider.valueChanged)
         self.tick_slider.valueChanged.connect(self.change_tick)
         
         tick_info = "Tick: 0" if max_ticks > 0 else "No debug data - run with patched runner"
@@ -541,10 +552,10 @@ class DebugVisualizerWindow(QWidget):
 
     def change_round(self, index):
         self.model.set_round(index)
-        self.tick_slider.blockSignals(True)
+        safe_disconnect(self.tick_slider.valueChanged)
         self.tick_slider.setMaximum(max(0, len(self.model.ticks) - 1))
         self.tick_slider.setValue(0)
-        self.tick_slider.blockSignals(False)
+        self.tick_slider.valueChanged.connect(self.change_tick)
         self.maze_view.update()
 
     def change_tick(self, index):
@@ -976,7 +987,8 @@ class Main(QMainWindow):
         try:
             self.ui.out.append("🔧 Creating visualizer window...")
             if self.visualizer is not None:
-                self.visualizer.close()
+                self.visualizer.setParent(None)
+                self.visualizer.deleteLater()
                 self.visualizer = None
             self.visualizer=DebugVisualizerWindow(data,None)
             self.visualizer.setWindowFlags(Qt.Window)
