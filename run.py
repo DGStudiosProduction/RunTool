@@ -1,5 +1,6 @@
 import sys
 import os
+import stat
 import subprocess
 import yaml
 import shlex
@@ -575,12 +576,14 @@ class UI(QWidget):
         self.base=os.path.dirname(os.path.abspath(__file__))
         stages_file = os.path.join(self.base, "stages.yaml")
         if os.path.exists(stages_file):
-            self.stages = yaml.safe_load(open(stages_file))
+            with open(stages_file) as f:
+                self.stages = yaml.safe_load(f)
         else:
             self.stages = {}
         self.customstages_path=os.path.join(self.base,"customstages.yaml")
         if os.path.exists(self.customstages_path):
-            self.customstages=yaml.safe_load(open(self.customstages_path))
+            with open(self.customstages_path) as f:
+                self.customstages=yaml.safe_load(f)
         else:
             self.customstages={}
         self.profile=os.path.join(self.base,"last_profile.json")
@@ -753,9 +756,13 @@ class UI(QWidget):
         d["verbose"]=self.verb.value()
         d["max_tps"]=self.tps.value()
         self.customstages[name]=d
-        yaml.safe_dump(self.customstages,open(self.customstages_path,"w"))
-    def sanitize(self,x):
-        return str(x).replace("\\","/").replace("–","-").replace("—","-")
+        with open(self.customstages_path, "w") as f:
+            yaml.safe_dump(self.customstages, f)
+    def sanitize(self, x):
+        result = str(x).replace("–", "-").replace("—", "-")
+        if sys.platform.startswith("win"):
+            result = result.replace("\\", "/")
+        return result
     def add_bot(self):
         p=QFileDialog.getExistingDirectory(self,"Bot Folder",self.last)
         if not p: return
@@ -773,7 +780,8 @@ class UI(QWidget):
         for b in c.get("bots",[]): self.bots.addItem(b)
     def save_conf(self):
         bs=[self.bots.item(i).text() for i in range(self.bots.count())]
-        json.dump({"bots":bs},open(self.conf,"w",encoding="utf-8"))
+        with open(self.conf, "w", encoding="utf-8") as f:
+            json.dump({"bots":bs}, f)
     def normalize_file(self,path):
         try:
             data=open(path,"rb").read()
@@ -807,22 +815,29 @@ class UI(QWidget):
         while i<len(lines):
             out.append(lines[i]);i+=1
         open(bot_py,"w",encoding="utf-8",newline="\n").write("\n".join(out)+"\n")
-    def ensure_start_sh(self,bot_dir):
-        start=os.path.join(bot_dir,"start.sh")
+    def ensure_start_sh(self, bot_dir):
+        start = os.path.join(bot_dir, "start.sh")
         if not os.path.exists(start):
-            cmd=None
-            if os.path.exists(os.path.join(bot_dir,"bot.py")): cmd="python3 bot.py"
-            elif os.path.exists(os.path.join(bot_dir,"bot.rb")): cmd="ruby bot.rb"
-            elif os.path.exists(os.path.join(bot_dir,"bot.js")): cmd="node bot.js"
+            cmd = None
+            if os.path.exists(os.path.join(bot_dir, "bot.py")):
+                cmd = "python3 bot.py"
+            elif os.path.exists(os.path.join(bot_dir, "bot.rb")):
+                cmd = "ruby bot.rb"
+            elif os.path.exists(os.path.join(bot_dir, "bot.js")):
+                cmd = "node bot.js"
             if cmd:
-                open(start,"w",encoding="utf-8",newline="\n").write("#!/usr/bin/env bash\n"+cmd+"\n")
+                open(start, "w", encoding="utf-8", newline="\n").write(
+                    "#!/usr/bin/env bash\n" + cmd + "\n"
+                )
+                if not sys.platform.startswith("win"):
+                    os.chmod(start, os.stat(start).st_mode | stat.S_IEXEC)
         self.normalize_file(start)
-    def prepare_bot_folder(self,win_dir):
-        win_dir=self.sanitize(win_dir)
-        self.normalize_tree(win_dir,(".py",".sh"))
-        bot_py=os.path.join(win_dir,"bot.py")
+    def prepare_bot_folder(self, bot_dir):
+        bot_dir = self.sanitize(bot_dir)
+        self.normalize_tree(bot_dir, (".py", ".sh"))
+        bot_py = os.path.join(bot_dir, "bot.py")
         self.ensure_python_flush(bot_py)
-        self.ensure_start_sh(win_dir)
+        self.ensure_start_sh(bot_dir)
     def build_args(self):
         a=[]
         def add(f,v):
