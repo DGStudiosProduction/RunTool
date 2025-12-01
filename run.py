@@ -900,8 +900,8 @@ class UI(QWidget):
                 pass
         
         args += ["--write-profile-json", "last_profile.json"]
-        arg = " ".join(shlex.quote(x) for x in args)
-        bts = " ".join(shlex.quote(x) for x in bots)
+        arg = " ".join(shlex.quote(str(x)) for x in args)
+        bts = " ".join(shlex.quote(str(x)) for x in bots)
         
         runner_file = "runner_patched.rb" if os.path.exists(
             os.path.join(self.base, "runner_patched.rb")
@@ -938,21 +938,26 @@ class UI(QWidget):
             self.prog.setRange(0, 0)
             self.prog.setVisible(True)
             
-            term = None
-            for candidate in ["gnome-terminal", "konsole", "xfce4-terminal", "xterm"]:
-                if shutil.which(candidate):
-                    term = candidate
-                    break
+            wrapped_cmd = f"bash -c \"{cmd}; echo; read -p 'Press ENTER to close...'\""
             
-            if term:
-                if term == "gnome-terminal":
-                    subprocess.Popen([term, "--", "bash", "-c", cmd])
-                elif term in ["konsole", "xfce4-terminal"]:
-                    subprocess.Popen([term, "-e", f"bash -c '{cmd}'"])
+            terminal = (
+                shutil.which("x-terminal-emulator") or
+                shutil.which("xterm") or
+                shutil.which("gnome-terminal") or
+                shutil.which("konsole") or
+                shutil.which("xfce4-terminal")
+            )
+            
+            try:
+                if terminal is not None:
+                    if "gnome-terminal" in terminal:
+                        subprocess.Popen([terminal, "--", "bash", "-c", wrapped_cmd])
+                    else:
+                        subprocess.Popen([terminal, "-e", wrapped_cmd])
                 else:
-                    subprocess.Popen([term, "-e", f"bash -c '{cmd}'"])
-            else:
-                subprocess.Popen(cmd, shell=True)
+                    subprocess.Popen(cmd, shell=True)
+            except Exception as e:
+                self.out.append(f"❌ Terminal launch failed: {e}")
         
         self.m = None
         self.t.start(800)
